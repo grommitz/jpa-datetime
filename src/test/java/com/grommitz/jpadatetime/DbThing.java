@@ -4,8 +4,8 @@ import javax.persistence.*;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "MARIARESULT")
-public class MariaResult {
+@Table(name = "DBTHING")
+public class DbThing {
 	@Id
 	@GeneratedValue(strategy = GenerationType.IDENTITY)
 	private long id;

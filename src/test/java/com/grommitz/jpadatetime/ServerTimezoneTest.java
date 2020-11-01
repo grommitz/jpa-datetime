@@ -1,62 +1,65 @@
 package com.grommitz.jpadatetime;
 
-import ch.vorburger.exec.ManagedProcessException;
-import ch.vorburger.mariadb4j.DB;
-import ch.vorburger.mariadb4j.DBConfiguration;
-import ch.vorburger.mariadb4j.DBConfigurationBuilder;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
+import com.wix.mysql.EmbeddedMysql;
+import com.wix.mysql.ScriptResolver;
+import com.wix.mysql.config.MysqldConfig;
+import org.junit.jupiter.api.*;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.persistence.EntityManager;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.TimeZone;
+import java.util.concurrent.TimeUnit;
 
+import static com.wix.mysql.EmbeddedMysql.anEmbeddedMysql;
+import static com.wix.mysql.config.Charset.UTF8;
+import static com.wix.mysql.config.MysqldConfig.aMysqldConfig;
+import static com.wix.mysql.distribution.Version.v8_0_17;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class ServerTimezoneTest {
 
 	private static final Logger logger = LoggerFactory.getLogger(ServerTimezoneTest.class.getName());
 	private TimeZone tz;
-	private DB db;
+	private static EmbeddedMysql mysqld;
 	public static final String JDBC_URL = "jdbc:mysql://localhost:4406/testdb";
 	private String jdbcUrl = JDBC_URL;
 
-	@BeforeEach
-	void startDB() throws ManagedProcessException {
-		tz = TimeZone.getDefault();
-		// Note the Maria server is always in UTC regardless of the system time soze
-		DBConfiguration config = DBConfigurationBuilder.newBuilder()
-				.setPort(4406)
+	@BeforeAll
+	static void init() {
+		MysqldConfig config = aMysqldConfig(v8_0_17)
+				.withCharset(UTF8)
+				.withPort(4406)
+				.withUser("testuser", "")
+				.withTimeZone("Europe/London")
+				.withTimeout(2, TimeUnit.MINUTES)
 				.build();
-		db = DB.newEmbeddedDB(config);
-		db.start();
-		db.source("setup.sql");
+
+		mysqld = anEmbeddedMysql(config)
+				.addSchema("testdb", ScriptResolver.classPathScript("setup.sql"))
+				.start();
+	}
+
+	@AfterAll
+	static void finish() {
+		mysqld.stop();
+	}
+
+	@BeforeEach
+	void startDB() {
+		tz = TimeZone.getDefault();
 	}
 
 	@AfterEach
-	void tearDown() throws ManagedProcessException {
-		db.stop();
+	void tearDown() {
 		TimeZone.setDefault(tz);
-	}
-
-	@Test
-	void serverDefaultTzTest() {
-		setSystemTimezone("Europe/Paris"); // UTC +2:00 in summer
-		EntityManager em = connect();
-		MariaResult r = em.find(MariaResult.class, 2L); // 14:00 in the server's local time, ie UTC
-		LocalTime time = r.getDate().toLocalTime();
-		System.out.println(time);
-		assertThat(time, is(LocalTime.of(16, 0)));
 	}
 
 	/*
@@ -78,8 +81,7 @@ public class ServerTimezoneTest {
 		setSystemTimezone(timezone);
 		EntityManager em = connect();
 
-		MariaResult r = em.find(MariaResult.class, 1L); // 13:00 in the server's local time
-		LocalTime time = r.getDate().toLocalTime();
+		LocalTime time = em.find(DbThing.class, 1L).getDate().toLocalTime(); // 13:00 in the server's local time
 
 		logger.info("MySQL timezone              : Europe/London");
 		logger.info("JVM timezone                : {}", TimeZone.getDefault().getID());
@@ -90,33 +92,25 @@ public class ServerTimezoneTest {
 				time.toString(), is(expectedTime));
 	}
 
+	/*
+	 * Test that whatever the serverTimezone, a round trip to the database preserves the
+	 * correct time.
+	 */
 	@ParameterizedTest
-	@CsvSource({"Europe/London", "US/Eastern", "Asia/Shanghai"})
+	@CsvSource({"Europe/London", "US/Eastern", "Asia/Shanghai", "Australia/Canberra"})
 	@DisplayName("Times are converted to the MySQL server's timezone on write")
-	void writeTest(String timezone) {
+	void writeTest(String mysqlServerTimezone) {
 
-		setSystemTimezone("Europe/Paris");
-		setMySQLTimezone(timezone);
-
+		setMySQLTimezone(mysqlServerTimezone);
 		EntityManager em = connect();
-		long id = givenResultAt1PMInTheSystemTimezone(em);
 
-		MariaResult r = em.find(MariaResult.class, id);
-		LocalTime time = r.getDate().toLocalTime();
+		final LocalDate date = LocalDate.of(2020,8,1);
+		final LocalTime timeInserted = LocalTime.of(13, 0);
+		long id = givenResultAt(em, LocalDateTime.of(date, timeInserted));
 
-		logger.info("MySQL timezone              : {}", timezone);
-		logger.info("JVM timezone                : {}", TimeZone.getDefault().getID());
-		logger.info("Time stored in the database : 13:00");
-		logger.info("Time at the JVM's timezone  : {}", time);
+		LocalTime timeRetrieved = em.find(DbThing.class, id).getDate().toLocalTime();
 
-		assertThat("Time in " + TimeZone.getDefault() + " for 1pm in " + timezone + " should be 13:00",
-				time, is(LocalTime.of(13, 0)));
-
-		jdbcUrl = JDBC_URL;
-		EntityManager em2 = connect();
-		r = em.find(MariaResult.class, id);
-		System.out.println("without serverTimezone: " + r.getDate());
-
+		assertThat(timeRetrieved, is(timeInserted));
 	}
 
 	/*
@@ -126,55 +120,62 @@ public class ServerTimezoneTest {
 	@ParameterizedTest
 	@CsvSource({"Europe/London, 14:00", "US/Eastern, 19:00", "Europe/Paris, 13:00"})
 	@DisplayName("Local DB times to be converted to the system's timezone")
-	void readConvertsTimes(String timezone, String eta) {
+	void readConvertsTimes(String mysqlServerTimezone, String eta) {
 
 		setSystemTimezone("Europe/Paris");
-		setMySQLTimezone(timezone);
-
-		// built a connection string & explicitly tell the driver the timezone of the MySQL server. It will then
-		// automatically convert it to the time our system time
-		//String jdbcUrl = "jdbc:mysql://localhost:4406/testdb?serverTimezone=" + timezone;
+		setMySQLTimezone(mysqlServerTimezone);
 		EntityManager em = connect();
 
 		// this was inserted in the setup.sql script
-		MariaResult r = em.find(MariaResult.class, 1L);
-		System.out.println(r.getDate());
+		DbThing r = em.find(DbThing.class, 1L);
 		String timePart = r.getDate().toLocalTime().toString();
 
-		logger.info("MySQL timezone              : {}", timezone);
+		logger.info("MySQL timezone              : {}", mysqlServerTimezone);
 		logger.info("JVM timezone                : {}", TimeZone.getDefault().getID());
 		logger.info("Time stored in the database : 13:00");
 		logger.info("Time at the JVM's timezone  : {}", r.getDate().toLocalTime());
 
-		assertThat("Time in " + TimeZone.getDefault() + " for 1pm in " + timezone + " should be " + eta,
+		assertThat("Time in " + TimeZone.getDefault() + " for 1pm in " + mysqlServerTimezone + " should be " + eta,
 				timePart, is(eta));
 	}
 
 	@Test
-	void change() {
+	@DisplayName("Using the serverTimezone changes the meaning of times stored before it was added")
+	void usingServerTimezoneChangesSemantics() {
 		setSystemTimezone("US/Eastern");
 
 		EntityManager em = connect();
-		LocalTime time0 = em.find(MariaResult.class, 1L).getDate().toLocalTime();
-		System.out.println(time0);
+		long id = givenResultAt1PMInTheSystemTimezone(em);
+
+		LocalTime time0 = em.find(DbThing.class, id).getDate().toLocalTime();
+		assertThat(time0, is(LocalTime.of(13, 0)));
 
 		setMySQLTimezone("US/Eastern");
 		em = connect();
-		LocalTime time1 = em.find(MariaResult.class, 1L).getDate().toLocalTime();
-		System.out.println(time1);
+		LocalTime time1 = em.find(DbThing.class, id).getDate().toLocalTime(); // same result, but the time is now different
 
-		if (!time1.equals(time0)) {
-			fail("Times have been changed my friend");
-		}
+		assertThat(time1, is(time0.plusHours(5)));
+		System.err.println("Oops - adding serverTimezone has pushed the time forward 5h!");
 	}
 
+	/*
+	 * MySQL seems to allow us to insert this "bad time" which is in the non-existant hour when the clocks go forward.
+	 * MariaDB does not allow it to be inserted.
+	 */
 	@Test
 	void badTimeInSpringJumpForward() {
+//		setSystemTimezone("Europe/London");
+//		setMySQLTimezone("Europe/London");
 
 		EntityManager em = connect();
-		LocalTime time0 = em.find(MariaResult.class, 3L).getDate().toLocalTime();
+		long id = givenResultAt(em, LocalDateTime.of(2018, 3, 25,  1, 31, 4));
+		LocalTime time0 = em.find(DbThing.class, id).getDate().toLocalTime();
 		System.out.println(time0);
 
+		setSystemTimezone("US/Eastern");
+		em = connect();
+		LocalTime time1 = em.find(DbThing.class, id).getDate().toLocalTime();
+		System.out.println(time1);
 	}
 
 	private void setMySQLTimezone(String timezone) {
@@ -186,9 +187,13 @@ public class ServerTimezoneTest {
 	}
 
 	private long givenResultAt1PMInTheSystemTimezone(EntityManager em) {
-		MariaResult r = new MariaResult();
-		r.setDate(LocalDateTime.of(2020, 1, 1, 13, 0, 0));
-		r.setUrl("http://1pm.com");
+		return givenResultAt(em, LocalDateTime.of(2020, 1, 1, 13, 0, 0));
+	}
+
+	private long givenResultAt(EntityManager em, LocalDateTime dateTime) {
+		DbThing r = new DbThing();
+		r.setDate(dateTime);
+		r.setUrl("http://givenresult.com");
 		em.getTransaction().begin();
 		em.persist(r);
 		em.getTransaction().commit();
@@ -198,7 +203,8 @@ public class ServerTimezoneTest {
 	private EntityManager connect() {
 		return EmfBuilder.forMySQL()
 				.setProperty("hibernate.connection.url", jdbcUrl)
-				.withEntities(MariaResult.class)
+				.setProperty("hibernate.connection.user", "testuser")
+				.withEntities(DbThing.class)
 				.build()
 				.createEntityManager();
 	}
