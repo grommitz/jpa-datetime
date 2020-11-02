@@ -12,7 +12,7 @@ public class DbThing {
 	@Column
 	private String url;
 	@Column
-	private LocalDateTime date;
+	private LocalDateTime time;
 
 	public long getId() {
 		return id;
@@ -30,11 +30,11 @@ public class DbThing {
 		this.url = url;
 	}
 
-	public LocalDateTime getDate() {
-		return date;
+	public LocalDateTime getTime() {
+		return time;
 	}
 
-	public void setDate(LocalDateTime date) {
-		this.date = date;
+	public void setTime(LocalDateTime time) {
+		this.time = time;
 	}
 }

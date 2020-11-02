@@ -81,7 +81,7 @@ public class ServerTimezoneTest {
 		setSystemTimezone(timezone);
 		EntityManager em = connect();
 
-		LocalTime time = em.find(DbThing.class, 1L).getDate().toLocalTime(); // 13:00 in the server's local time
+		LocalTime time = em.find(DbThing.class, 1L).getTime().toLocalTime(); // 13:00 in the server's local time
 
 		logger.info("MySQL timezone              : Europe/London");
 		logger.info("JVM timezone                : {}", TimeZone.getDefault().getID());
@@ -108,7 +108,7 @@ public class ServerTimezoneTest {
 		final LocalTime timeInserted = LocalTime.of(13, 0);
 		long id = givenResultAt(em, LocalDateTime.of(date, timeInserted));
 
-		LocalTime timeRetrieved = em.find(DbThing.class, id).getDate().toLocalTime();
+		LocalTime timeRetrieved = em.find(DbThing.class, id).getTime().toLocalTime();
 
 		assertThat(timeRetrieved, is(timeInserted));
 	}
@@ -128,12 +128,12 @@ public class ServerTimezoneTest {
 
 		// this was inserted in the setup.sql script
 		DbThing r = em.find(DbThing.class, 1L);
-		String timePart = r.getDate().toLocalTime().toString();
+		String timePart = r.getTime().toLocalTime().toString();
 
 		logger.info("MySQL timezone              : {}", mysqlServerTimezone);
 		logger.info("JVM timezone                : {}", TimeZone.getDefault().getID());
 		logger.info("Time stored in the database : 13:00");
-		logger.info("Time at the JVM's timezone  : {}", r.getDate().toLocalTime());
+		logger.info("Time at the JVM's timezone  : {}", r.getTime().toLocalTime());
 
 		assertThat("Time in " + TimeZone.getDefault() + " for 1pm in " + mysqlServerTimezone + " should be " + eta,
 				timePart, is(eta));
@@ -147,12 +147,12 @@ public class ServerTimezoneTest {
 		EntityManager em = connect();
 		long id = givenResultAt1PMInTheSystemTimezone(em);
 
-		LocalTime time0 = em.find(DbThing.class, id).getDate().toLocalTime();
+		LocalTime time0 = em.find(DbThing.class, id).getTime().toLocalTime();
 		assertThat(time0, is(LocalTime.of(13, 0)));
 
 		setMySQLTimezone("US/Eastern");
 		em = connect();
-		LocalTime time1 = em.find(DbThing.class, id).getDate().toLocalTime(); // same result, but the time is now different
+		LocalTime time1 = em.find(DbThing.class, id).getTime().toLocalTime(); // same result, but the time is now different
 
 		assertThat(time1, is(time0.plusHours(5)));
 		System.err.println("Oops - adding serverTimezone has pushed the time forward 5h!");
@@ -169,17 +169,58 @@ public class ServerTimezoneTest {
 
 		EntityManager em = connect();
 		long id = givenResultAt(em, LocalDateTime.of(2018, 3, 25,  1, 31, 4));
-		LocalTime time0 = em.find(DbThing.class, id).getDate().toLocalTime();
+		LocalTime time0 = em.find(DbThing.class, id).getTime().toLocalTime();
 		System.out.println(time0);
 
 		setSystemTimezone("US/Eastern");
 		em = connect();
-		LocalTime time1 = em.find(DbThing.class, id).getDate().toLocalTime();
+		LocalTime time1 = em.find(DbThing.class, id).getTime().toLocalTime();
 		System.out.println(time1);
 	}
 
+	/*
+		Test the problem that UPDATE queries cause the timestamp to move.
+		Conclusion - can't replicate it. Hibernate & the JDBC driver perform
+		as expected.
+ 	*/
+	@Test
+	void updateTest() {
+		setMySQLTimezone("Europe/London");
+		setSystemTimezone("US/Eastern");
+
+		// fetch the entry for 1.30am local time on 22/3. it should come out as 9.30pm US time the day before.
+		EntityManager em = connect();
+		DbThing dbThing = em.find(DbThing.class, 4L);
+
+		{
+			// sanity check
+			assertThat(dbThing.getTime().toString(), is("2018-03-21T21:30"));
+		}
+
+		// now update a different field in the entity, leaving the time field untouched
+		dbThing.setUrl("http://update.com");
+		em.getTransaction().begin();
+		em.merge(dbThing);
+		em.getTransaction().commit();
+
+		{
+			// refetch, check the time didn't change
+			final LocalTime time1 = em.find(DbThing.class, 4L).getTime().toLocalTime();
+			assertThat("how the hell did that happen???", time1.toString(), is("21:30"));
+		}
+
+		{
+			// now double check by pretending the mysql server is running in the same timezone as the system, so
+			// the time should not be altered
+			setMySQLTimezone("US/Eastern");
+			EntityManager em2 = connect();
+			final LocalTime time2 = em2.find(DbThing.class, 4L).getTime().toLocalTime();
+			assertThat(time2.toString(), is("01:30"));
+		}
+	}
+
 	private void setMySQLTimezone(String timezone) {
-		jdbcUrl = jdbcUrl + "?serverTimezone=" + timezone;
+		jdbcUrl = JDBC_URL + "?serverTimezone=" + timezone;
 	}
 
 	private void setSystemTimezone(String tz) {
@@ -192,7 +233,7 @@ public class ServerTimezoneTest {
 
 	private long givenResultAt(EntityManager em, LocalDateTime dateTime) {
 		DbThing r = new DbThing();
-		r.setDate(dateTime);
+		r.setTime(dateTime);
 		r.setUrl("http://givenresult.com");
 		em.getTransaction().begin();
 		em.persist(r);
@@ -204,6 +245,9 @@ public class ServerTimezoneTest {
 		return EmfBuilder.forMySQL()
 				.setProperty("hibernate.connection.url", jdbcUrl)
 				.setProperty("hibernate.connection.user", "testuser")
+				//.setProperty("hibernate.show_sql", "true")
+				//.setProperty("hibernate.format_sql", "true")
+				//.setProperty("hibernate.use_sql_comments", "true")
 				.withEntities(DbThing.class)
 				.build()
 				.createEntityManager();
