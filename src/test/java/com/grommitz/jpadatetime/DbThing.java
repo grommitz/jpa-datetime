@@ -2,6 +2,7 @@ package com.grommitz.jpadatetime;
 
 import javax.persistence.*;
 import java.time.LocalDateTime;
+import java.util.Calendar;
 
 @Entity
 @Table(name = "DBTHING")
@@ -11,8 +12,14 @@ public class DbThing {
 	private long id;
 	@Column
 	private String url;
+
 	@Column
 	private LocalDateTime time;
+
+	@Temporal(TemporalType.TIMESTAMP)
+	@Column
+	private Calendar calTime;
+
 
 	public long getId() {
 		return id;
@@ -36,5 +43,13 @@ public class DbThing {
 
 	public void setTime(LocalDateTime time) {
 		this.time = time;
+	}
+
+	public Calendar getCalTime() {
+		return calTime;
+	}
+
+	public void setCalTime(Calendar calTime) {
+		this.calTime = calTime;
 	}
 }

@@ -10,9 +10,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.persistence.EntityManager;
+import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.Calendar;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 
@@ -180,8 +182,9 @@ public class ServerTimezoneTest {
 
 	/*
 		Test the problem that UPDATE queries cause the timestamp to move.
-		Conclusion - can't replicate it. Hibernate & the JDBC driver perform
-		as expected.
+		Hibernate & the JDBC driver....
+		* perform as expected with a DATETIME field mapped to java LocalDateTime
+		* something strange happens with a DATETIME field mapped to a java Calendar object
  	*/
 	@Test
 	void updateTest() {
@@ -189,34 +192,57 @@ public class ServerTimezoneTest {
 		setSystemTimezone("US/Eastern");
 
 		// fetch the entry for 1.30am local time on 22/3. it should come out as 9.30pm US time the day before.
-		EntityManager em = connect();
-		DbThing dbThing = em.find(DbThing.class, 4L);
-
 		{
+			EntityManager em = connect();
+			DbThing dbThing = em.find(DbThing.class, 4L);
+
 			// sanity check
 			assertThat(dbThing.getTime().toString(), is("2018-03-21T21:30"));
+			assertThat(format(dbThing.getCalTime()), is("2018-03-21T21:30"));
+
+			// now update a different field in the entity, leaving the time fields untouched
+			dbThing.setUrl("http://update.com");
+			em.getTransaction().begin();
+			em.merge(dbThing);
+			em.getTransaction().commit();
+
+			// refetch in SAME SESSION, check the time didn't change
+			final DbThing dbThing2 = em.find(DbThing.class, 4L);
+			assertThat(dbThing2.getTime().toString(), is("2018-03-21T21:30"));
+			assertThat(format(dbThing2.getCalTime()), is("2018-03-21T21:30"));
 		}
 
-		// now update a different field in the entity, leaving the time field untouched
-		dbThing.setUrl("http://update.com");
-		em.getTransaction().begin();
-		em.merge(dbThing);
-		em.getTransaction().commit();
-
 		{
-			// refetch, check the time didn't change
-			final LocalTime time1 = em.find(DbThing.class, 4L).getTime().toLocalTime();
-			assertThat("how the hell did that happen???", time1.toString(), is("21:30"));
+			// refetch in a NEW SESSION check the time didn't change
+			EntityManager em = connect();
+			final DbThing dbThing = em.find(DbThing.class, 4L);
+
+			System.out.println("Server still in Europe/London, new hibernate session:");
+			System.out.println("Calendar      = " + format(dbThing.getCalTime()));
+			System.out.println("LocalDateTime = " + dbThing.getTime().toString());
+
+			assertThat(dbThing.getTime().toString(), is("2018-03-21T21:30"));
+			//assertThat(format(dbThing.getCalTime()), is("2018-03-21T21:30")); <--- FAILS!
 		}
 
 		{
-			// now double check by pretending the mysql server is running in the same timezone as the system, so
-			// the time should not be altered
+			// now double check by pretending the mysql server is running in the same timezone as the system, so the
+			// time we get in java should be the same time seen in the database
 			setMySQLTimezone("US/Eastern");
-			EntityManager em2 = connect();
-			final LocalTime time2 = em2.find(DbThing.class, 4L).getTime().toLocalTime();
-			assertThat(time2.toString(), is("01:30"));
+			EntityManager em = connect();
+			final DbThing dbThing = em.find(DbThing.class, 4L);
+
+			System.out.println("Server in US/Eastern:");
+			System.out.println("Calendar      = " + format(dbThing.getCalTime()));
+			System.out.println("LocalDateTime = " + dbThing.getTime().toString());
+			assertThat(dbThing.getTime().toString(), is("2018-03-22T01:30"));
+			//assertThat(format(dbThing.getCalTime()), is("2018-03-22T01:30")); //  <--- FAILS!
 		}
+	}
+
+	private String format(Calendar cal) {
+		final SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm");
+		return sdf.format(cal.getTime());
 	}
 
 	private void setMySQLTimezone(String timezone) {
